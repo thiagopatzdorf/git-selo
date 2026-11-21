@@ -217,6 +217,17 @@ git selo is the first enforcement of `access` in [MAPI](https://github.com/thiag
 contract format where every capability says what it does, how to undo it, how to prove it worked,
 what it costs, and **who may call it**.
 
+## Releasing
+
+Releases go out by npm [Trusted Publishing](https://docs.npmjs.com/trusted-publishers): no token stored
+anywhere, and each version on npm carries provenance pointing back to this repo and workflow.
+
+1. Bump `version` in `package.json`.
+2. Tag that commit `vX.Y.Z` and push the tag. [`publish.yml`](.github/workflows/publish.yml) runs the
+   tests, checks the tag matches `package.json`, and publishes.
+
+To rehearse without publishing: Actions → **publish** → Run workflow (`dry_run` on).
+
 ## License
 
 MIT, see [LICENSE](LICENSE). Made by [Genesis Innovation](https://genesisinnovation.io).
