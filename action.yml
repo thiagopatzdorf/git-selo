@@ -1,0 +1,11 @@
+name: git-selo check
+description: Fail the build if a protected file is committed in plaintext, or encrypted for people other than .selo.json says.
+inputs:
+  strict:
+    description: Also fail on tracked files that look like secrets (.env, *.pem, *.key) but are not protected.
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: node "$GITHUB_ACTION_PATH/git-selo.mjs" check ${{ inputs.strict == 'true' && '--strict' || '' }}

@@ -1,0 +1,3 @@
+# >>> git-selo (generated from .selo.json by `git selo sync`; do not edit)
+.env* filter=selo diff=selo
+# <<< git-selo

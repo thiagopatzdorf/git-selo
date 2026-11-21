@@ -1,0 +1,42 @@
+{
+  "name": "git-selo",
+  "version": "0.1.0",
+  "description": "Private files inside a normal Git repo, encrypted to your teammates' GitHub SSH keys. Zero dependencies, standard age format.",
+  "type": "module",
+  "bin": {
+    "git-selo": "git-selo.mjs"
+  },
+  "files": [
+    "git-selo.mjs",
+    "age.mjs",
+    "action.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "keywords": [
+    "git",
+    "secrets",
+    "dotenv",
+    "encryption",
+    "age",
+    "ssh",
+    "github",
+    "gitattributes"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thiagopatzdorf/git-selo.git"
+  },
+  "homepage": "https://github.com/thiagopatzdorf/git-selo#readme",
+  "bugs": {
+    "url": "https://github.com/thiagopatzdorf/git-selo/issues"
+  },
+  "author": "Genesis Innovation"
+}

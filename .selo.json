@@ -1,0 +1,18 @@
+{
+  "groups": {
+    "team": [
+      "@thiagopatzdorf"
+    ]
+  },
+  "files": {
+    ".env*": [
+      "team"
+    ]
+  },
+  "keys": {
+    "@thiagopatzdorf": [
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGkvkEZCib+ZiCvGbiCBGUTgvvS9TLpoiaA7jsVdzn9M",
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINMIHlBNia8f2NfSFDIPM9VxxUHnoBSby0L+eTdGHmIm"
+    ]
+  }
+}
