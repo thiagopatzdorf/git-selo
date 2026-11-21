@@ -41,7 +41,10 @@ jobs:
       - name: publish
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.dry_run }}" = "true" ]; then
-            npm publish --access public --dry-run
+            # Ensaio só empacota: `npm publish --dry-run` consulta o registro e falha se a versão já existe
+            # (medido no 1º ensaio, com a 0.2.0 já publicada).
+            npm pack --dry-run
+            echo "no registro: $(npm view git-selo version) | este commit: $(node -p 'require("./package.json").version')"
           else
             npm publish --access public
           fi
