@@ -63,6 +63,31 @@ $ git selo status
   you can read
 ```
 
+## Private branches
+
+Theo also asked for *"private branches that only 3 team members can see"*. Same idea, applied to commits:
+
+```sh
+git checkout -b launch && git commit -am "the secret thing"
+git selo branch push launch --for core   # the whole branch, encrypted to the "core" group
+git selo branch list                     # what exists, and which ones you can open
+git selo branch pull launch              # readers get it back as a normal Git branch
+```
+
+- The branch becomes a [git bundle](https://git-scm.com/docs/git-bundle) of only the commits the remote doesn't
+  have yet, encrypted with age to the group's keys, stored in the **same repo** under `refs/selo/<name>`.
+  A normal `git clone` doesn't even download it; for anyone not on the list it is an unreadable blob.
+- Readers get a real branch back: history, messages, files, `git log`, everything. They commit and
+  `git selo branch push` again, and the rest of the team pulls.
+- **The habit guard:** `git selo` installs a `pre-push` hook that refuses `git push origin launch`
+  for any branch `.selo.json` marks private, so muscle memory can't leak it in plaintext.
+- Who can read a branch lives in `"branches"` in `.selo.json`, taken from the remote's main branch, so
+  a stale copy inside an old branch can't loosen it.
+
+What it doesn't do: no PR/diff UI on GitHub while it's encrypted (GitHub can't read it; review
+locally), and merging into `main` makes it public, which is the point of merging. The branch *name*,
+size and push times are visible.
+
 ## Why it's different
 
 - **Your identity already exists.** `@alice` means the SSH keys GitHub publishes at
@@ -102,6 +127,8 @@ $ git selo status
 | `git selo check [--strict]` | the CI gate |
 | `git selo unlock` / `lock` | decrypt this clone / put the ciphertext back and remove the filters |
 | `git selo cat <file> [--rev REV]` | print a protected file from any commit |
+| `git selo branch push <b> [--for group]` | push a whole branch encrypted to `refs/selo/<b>` |
+| `git selo branch pull <b>` / `list` | get a private branch back as a normal branch / see which exist |
 | `git selo key` | create `~/.config/selo/identity.txt` and print its `age1…` key |
 
 ## The CI gate
@@ -160,6 +187,10 @@ Keys are read from `$SELO_IDENTITY`, `$SELO_IDENTITY_FILE`, `~/.config/selo/iden
 - **Real accounts**: the 21 keys @t3dotgg publishes (RSA-4096 and ed25519) become 21 recipients that
   the official `age` parses. @FiloSottile, the author of age, publishes only an ECDSA key, which age
   doesn't support; `git selo add` stops and points to `git selo key` instead of failing silently.
+- **Private branches with a whole team**: no commit, message or file of the branch appears anywhere in the
+  remote's objects; a plain clone doesn't fetch it; readers get the full history back; the `pre-push`
+  guard stops `git push origin <private>` even from inside a branch whose `.selo.json` predates the policy;
+  the encrypted bundle opens with the official `age` and `git bundle list-heads` reads it.
 - CI on Node 20 and 22, and this repo protects itself with its own `.selo.json`.
 
 ## Limits, said plainly
@@ -169,8 +200,6 @@ Keys are read from `$SELO_IDENTITY`, `$SELO_IDENTITY_FILE`, `~/.config/selo/iden
   (new API key, new password).
 - **Passphrase-protected SSH keys** can't be used: the Git filter has no terminal to ask. Use
   `git selo key` for a dedicated key; the tool tells you when it skips one.
-- **Private branches** aren't solved by this. A whole private branch needs a separate remote, or every
-  file in it protected.
 - File *names*, sizes and commit times stay visible. Only contents are protected.
 - One process per protected file on add and checkout: fine for dozens of secret files, not thousands.
 

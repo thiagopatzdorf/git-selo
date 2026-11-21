@@ -34,10 +34,10 @@ function loadPolicy(dir = root(), text) {
   const file = path.join(dir, POLICY);
   if (text === undefined) { if (!fs.existsSync(file)) fail(`no ${POLICY} here. Run \`git selo init\` first.`); text = fs.readFileSync(file, 'utf8'); }
   const p = JSON.parse(text);
-  return { groups: p.groups || {}, files: p.files || {}, keys: p.keys || {} };
+  return { groups: p.groups || {}, files: p.files || {}, branches: p.branches || {}, keys: p.keys || {} };
 }
 function savePolicy(p, dir = root()) {
-  const sorted = { groups: p.groups, files: p.files, keys: Object.fromEntries(Object.entries(p.keys).sort()) };
+  const sorted = { groups: p.groups, files: p.files, ...(Object.keys(p.branches || {}).length ? { branches: p.branches } : {}), keys: Object.fromEntries(Object.entries(p.keys).sort()) };
   fs.writeFileSync(path.join(dir, POLICY), JSON.stringify(sorted, null, 2) + '\n');
 }
 
@@ -74,7 +74,16 @@ function expand(policy, names, seen = new Set()) {
 // de cifrar: chave trocada no GitHub não pode mudar quem lê sem passar por um PR).
 function recipientsFor(policy, file) {
   const who = readersOf(policy, file);
-  if (!who) return null;
+  return who ? resolveReaders(policy, who) : null;
+}
+// Branch privada: mesmos grupos e chaves dos arquivos. Padrão ancorado na raiz do nome
+// ("feat/*" casa "feat/x", nunca "outra/feat/x"), porque nome de branch não é caminho.
+function branchReaders(policy, name) {
+  let hit = null;
+  for (const [pat, who] of Object.entries(policy.branches)) if (globToRegex('/' + pat).test(name)) hit = who;
+  return hit;
+}
+function resolveReaders(policy, who) {
   const people = expand(policy, who), recips = [];
   for (const p of people) {
     if (p.startsWith('@')) {
@@ -160,6 +169,119 @@ function configureFilters() {
   git(['config', 'filter.selo.smudge', `${cmd} smudge %f`]);
   git(['config', 'filter.selo.required', 'true']);
   git(['config', 'diff.selo.textconv', `${cmd} textconv`]);
+  installHook(cmd);
+}
+// O vazamento mais provável de uma branch privada é o hábito: `git push origin feature`. O hook
+// recusa empurrar em texto claro qualquer branch que o .selo.json declara privada.
+const HOOK_MARK = '# git-selo pre-push (generated)';
+function hookPath() { return path.resolve(root(), git(['rev-parse', '--git-path', 'hooks/pre-push']).trim()); }
+function installHook(cmd) {
+  const f = hookPath();
+  if (fs.existsSync(f) && !fs.readFileSync(f, 'utf8').includes(HOOK_MARK)) { say(`not touching your existing ${path.basename(f)} hook: private branches are not guarded on push`); return; }
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  fs.writeFileSync(f, `#!/bin/sh\n${HOOK_MARK}\nexec ${cmd} pre-push "$@"\n`, { mode: 0o755 });
+}
+function removeHook() {
+  const f = hookPath();
+  if (fs.existsSync(f) && fs.readFileSync(f, 'utf8').includes(HOOK_MARK)) fs.rmSync(f);
+}
+function prePush() {
+  const policy = branchPolicy(process.argv[3] || 'origin');
+  const bad = [];
+  for (const line of readStdin().toString().split('\n')) {
+    const [, , remoteRef] = line.trim().split(/\s+/);
+    if (remoteRef && remoteRef.startsWith('refs/heads/')) {
+      const name = remoteRef.slice('refs/heads/'.length);
+      if (branchReaders(policy, name)) bad.push(name);
+    }
+  }
+  if (bad.length) fail(`refusing to push private branch(es) in plaintext: ${bad.join(', ')}. Use \`git selo branch push ${bad[0]}\`.`);
+}
+
+// ---------- branches privadas ----------
+// A política de uma branch vale a da branch principal do remoto (a revisada em PR), somada à da cópia
+// local, que tem prioridade. Sem isso, quem está DENTRO de uma branch privada criada antes da política
+// lê um .selo.json velho, que não sabe que a branch é privada (medido no teste do time).
+function branchPolicy(remote = 'origin') {
+  const local = loadPolicy(root());
+  for (const ref of [`refs/remotes/${remote}/HEAD`, `refs/remotes/${remote}/main`, `refs/remotes/${remote}/master`]) {
+    let text;
+    try { text = git(['show', `${ref}:${POLICY}`], { cwd: root() }); } catch { continue; }
+    const base = loadPolicy(root(), text);
+    return { groups: { ...base.groups, ...local.groups }, files: local.files,
+      branches: { ...base.branches, ...local.branches }, keys: { ...base.keys, ...local.keys } };
+  }
+  return local;
+}
+// A branch inteira vira um git bundle (só os commits que o remoto ainda não tem), cifrado em age para
+// os leitores e guardado em refs/selo/<nome>: uma ref que `git clone` não baixa e que, para quem não
+// está na lista, é um blob ilegível. Quem está na lista recebe de volta uma branch Git comum.
+const seloRef = (n) => `refs/selo/${n}`;
+function checkBranchName(n) {
+  try { git(['check-ref-format', '--branch', n]); } catch { fail(`invalid branch name "${n}"`); }
+  if (n.startsWith('-')) fail(`invalid branch name "${n}"`);
+}
+const BOT = { GIT_AUTHOR_NAME: 'git-selo', GIT_AUTHOR_EMAIL: 'git-selo@localhost', GIT_COMMITTER_NAME: 'git-selo', GIT_COMMITTER_EMAIL: 'git-selo@localhost' };
+function branchPush(name, remote, groups) {
+  checkBranchName(name);
+  const dir = root(), policy = branchPolicy(remote);
+  if (groups.length) { const p = loadPolicy(dir); p.branches[name] = groups; savePolicy(p, dir); policy.branches[name] = groups; say(`${POLICY}: branch "${name}" readable by ${groups.join(', ')} (commit this file)`); }
+  const who = branchReaders(policy, name);
+  if (!who) fail(`branch "${name}" has no readers in ${POLICY}. Use \`git selo branch push ${name} --for <group>\`.`);
+  try { git(['rev-parse', '--verify', '--quiet', `refs/heads/${name}`]); } catch { fail(`no local branch "${name}"`); }
+  const r = resolveReaders(policy, who);
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'selo-b-')), file = path.join(tmp, 'b.bundle');
+  try {
+    try { git(['bundle', 'create', file, `refs/heads/${name}`, '--not', `--remotes=${remote}`]); }
+    catch (e) { if (/empty bundle/i.test(String(e.stderr))) fail(`every commit of "${name}" is already on ${remote}: nothing private to push`); throw e; }
+    const ct = age.encrypt(fs.readFileSync(file), r.recips);
+    const blob = git(['hash-object', '-w', '--stdin'], { input: ct }).trim();
+    const tree = git(['mktree'], { input: `100644 blob ${blob}\tbundle.age\n` }).trim();
+    const commit = git(['commit-tree', tree, '-m', `git-selo private branch ${name}`], { env: { ...process.env, ...BOT } }).trim();
+    git(['update-ref', seloRef(name), commit]);
+    git(['push', '--quiet', remote, `+${seloRef(name)}:${seloRef(name)}`], { cwd: dir });
+    const n = git(['rev-list', '--count', `refs/heads/${name}`, '--not', `--remotes=${remote}`]).trim();
+    console.log(`pushed private branch "${name}" (${n} commit(s), ${r.people.join(', ')}) as ${seloRef(name)}`);
+  } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+}
+function fetchSelo(remote, name = '*') {
+  try { git(['fetch', '--quiet', remote, `+${seloRef(name)}:${seloRef(name)}`], { cwd: root() }); }
+  catch (e) { if (name !== '*') fail(`no private branch "${name}" on ${remote}`); }
+}
+function branchPull(name, remote, force) {
+  checkBranchName(name);
+  fetchSelo(remote, name);
+  const ct = git(['cat-file', 'blob', `${seloRef(name)}:bundle.age`], { raw: true });
+  const pt = age.decrypt(ct, loadIdentities());
+  if (!pt) fail(`you are not a reader of private branch "${name}"`);
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'selo-b-')), file = path.join(tmp, 'b.bundle');
+  try {
+    fs.writeFileSync(file, pt);
+    try { git(['bundle', 'verify', '--quiet', file]); }
+    catch { fail(`missing the public history this branch builds on: run \`git fetch ${remote}\` and try again`); }
+    const current = (() => { try { return git(['symbolic-ref', '--quiet', '--short', 'HEAD']).trim(); } catch { return ''; } })();
+    if (current === name) {
+      // Branch em uso: busca para uma ref temporária e avança só se for fast-forward.
+      git(['fetch', '--quiet', file, `+refs/heads/${name}:refs/selo-pull/${name}`]);
+      git(['merge', '--ff-only', '--quiet', `refs/selo-pull/${name}`], { cwd: root() });
+      git(['update-ref', '-d', `refs/selo-pull/${name}`]);
+    } else {
+      git(['fetch', '--quiet', file, `${force ? '+' : ''}refs/heads/${name}:refs/heads/${name}`]);
+    }
+    console.log(`private branch "${name}" is now local (${git(['rev-parse', '--short', `refs/heads/${name}`]).trim()})`);
+  } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+}
+function branchList(remote) {
+  fetchSelo(remote);
+  const names = git(['for-each-ref', '--format=%(refname:strip=2)', 'refs/selo/']).split('\n').filter(Boolean);
+  if (!names.length) { console.log(`no private branches on ${remote}`); return; }
+  const ids = loadIdentities(true), policy = branchPolicy(remote);
+  for (const n of names) {
+    const ct = git(['cat-file', 'blob', `${seloRef(n)}:bundle.age`], { raw: true });
+    let can = false; try { can = !!age.decrypt(ct, ids); } catch {}
+    const who = branchReaders(policy, n);
+    console.log(`${n}\n  readers: ${who ? resolveReaders(policy, who).people.join(', ') : '(not in .selo.json)'}\n  ${can ? 'you can read' : 'encrypted (not for you)'}`);
+  }
 }
 function syncAttributes(policy, dir = root()) {
   const file = path.join(dir, '.gitattributes');
@@ -210,6 +332,9 @@ const HELP = `git selo — private files inside a normal Git repo
   git selo unlock / lock               decrypt this clone / put the ciphertext back
   git selo key                         make a dedicated key (~/.config/selo/identity.txt)
   git selo cat <file> [--rev REV]      print a protected file from any revision
+  git selo branch push <b> [--for g]   push a whole branch encrypted (refs/selo/<b>)
+  git selo branch pull <b>             get a private branch back as a normal branch
+  git selo branch list                 private branches on the remote, and which you can read
 
 Readers decrypt with ~/.ssh/id_ed25519 or id_rsa, $SELO_IDENTITY, or the selo key.
 Files are standard age (https://age-encryption.org): \`age -d -i ~/.ssh/id_ed25519 file\` works too.`;
@@ -222,6 +347,15 @@ async function main(argv) {
     case 'clean': return clean(args[0]);
     case 'smudge': return smudge(args[0]);
     case 'textconv': return textconv(args[0]);
+    case 'pre-push': return prePush();
+    case 'branch': {
+      const [sub, name] = args;
+      const remote = flag(args, '--remote') || 'origin';
+      if (sub === 'push') { const groups = []; let g; while ((g = flag(args, '--for'))) groups.push(g); return branchPush(args[1], remote, groups); }
+      if (sub === 'pull') return branchPull(name, remote, args.includes('--force'));
+      if (sub === 'list') return branchList(remote);
+      fail('usage: git selo branch push <name> [--for group] | pull <name> [--force] | list   [--remote R]');
+    }
     case 'init': {
       const dir = root(), file = path.join(dir, POLICY);
       if (!fs.existsSync(file)) savePolicy({ groups: { team: [] }, files: { '.env*': ['team'] }, keys: {} }, dir);
@@ -305,7 +439,7 @@ async function main(argv) {
       else for (const k of ['filter.selo.clean', 'filter.selo.smudge', 'filter.selo.required', 'diff.selo.textconv']) try { git(['config', '--unset', k]); } catch {}
       for (const f of files) fs.rmSync(path.join(dir, f), { force: true });
       if (files.length) git(['checkout', '--', ...files], { cwd: dir });
-      if (cmd === 'lock') for (const f of files) fs.rmSync(cacheFile(f), { force: true });
+      if (cmd === 'lock') { for (const f of files) fs.rmSync(cacheFile(f), { force: true }); removeHook(); }
       console.log(cmd === 'unlock' ? `${files.length} protected file(s) checked out (decrypted where you are a reader)` : `${files.length} file(s) back to ciphertext; filters removed from this clone`);
       return;
     }
