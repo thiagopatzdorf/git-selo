@@ -8,7 +8,7 @@
 Your `.env` is committed encrypted to the SSH keys your teammates already have on GitHub.
 
 [![test](https://github.com/thiagopatzdorf/git-selo/actions/workflows/test.yml/badge.svg)](https://github.com/thiagopatzdorf/git-selo/actions/workflows/test.yml)
-[![release](https://img.shields.io/github/v/release/thiagopatzdorf/git-selo?color=1a7f37)](https://github.com/thiagopatzdorf/git-selo/releases)
+[![npm](https://img.shields.io/npm/v/git-selo?color=cb3837)](https://www.npmjs.com/package/git-selo)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 ![zero dependencies](https://img.shields.io/badge/dependencies-0-1a7f37)
 ![node ≥ 20](https://img.shields.io/badge/node-%E2%89%A5%2020-5fa04e)
@@ -28,7 +28,7 @@ keys listed for it. No server, no account, no new key to hand out.
 ## 60 seconds
 
 ```sh
-npm i -g github:thiagopatzdorf/git-selo   # zero dependencies, Node ≥ 20
+npm i -g git-selo                         # zero dependencies, Node ≥ 20 (or: npx git-selo …)
 git selo init                             # protects .env* by default, sets up the Git filters
 git selo add @alice @bob                  # fetches github.com/alice.keys and pins them in .selo.json
 git add -A && git commit -m "the junior pushed the .env, and it's fine"
@@ -117,7 +117,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: thiagopatzdorf/git-selo@v0      # or: run: npx github:thiagopatzdorf/git-selo check --strict
+      - uses: thiagopatzdorf/git-selo@v0      # or: run: npx git-selo check --strict
 ```
 
 ```console
