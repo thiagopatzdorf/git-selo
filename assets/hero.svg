@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 300" width="880" height="300" role="img" aria-labelledby="t d">
+  <title id="t">git selo</title>
+  <desc id="d">One repository. The .env file is stored encrypted. Alice and Bob, who are on the list, read it in plaintext; anyone else with a clone sees only ciphertext.</desc>
+  <style>
+    .bg{fill:#ffffff}.card{fill:#f6f8fa;stroke:#d0d7de}.ink{fill:#1f2328}.mute{fill:#59636e}
+    .ok{fill:#1a7f37}.no{fill:#cf222e}.line{stroke:#8c959f}.lock{fill:#9a6700}.cipher{fill:#8c959f}
+    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+    .sans{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+    @media (prefers-color-scheme: dark){
+      .bg{fill:#0d1117}.card{fill:#161b22;stroke:#30363d}.ink{fill:#e6edf3}.mute{fill:#9198a1}
+      .ok{fill:#3fb950}.no{fill:#f85149}.line{stroke:#6e7681}.lock{fill:#d29922}.cipher{fill:#6e7681}
+    }
+  </style>
+  <rect class="bg" width="880" height="300" rx="12"/>
+
+  <!-- the repo -->
+  <rect class="card" x="28" y="54" width="250" height="192" rx="10" stroke-width="1.5"/>
+  <text class="ink sans" x="48" y="86" font-size="16" font-weight="600">your-repo/</text>
+  <text class="mute mono" x="48" y="120" font-size="14">README.md</text>
+  <text class="mute mono" x="48" y="146" font-size="14">src/</text>
+  <text class="ink mono" x="48" y="172" font-size="14" font-weight="600">.env</text>
+  <g class="lock" transform="translate(96 159)">
+    <rect x="0" y="6" width="12" height="9" rx="2"/>
+    <path d="M2.5 6V4a3.5 3.5 0 0 1 7 0v2" fill="none" stroke="currentColor" stroke-width="1.8" class="lock" style="stroke:inherit"/>
+  </g>
+  <text class="mute mono" x="48" y="198" font-size="14">.selo.json</text>
+  <text class="mute sans" x="48" y="228" font-size="12">who reads what, reviewed in PRs</text>
+
+  <!-- arrows -->
+  <path class="line" d="M278 150 C 330 150, 330 84, 380 84" fill="none" stroke-width="1.6"/>
+  <path class="line" d="M278 150 L 380 150" fill="none" stroke-width="1.6"/>
+  <path class="line" d="M278 150 C 330 150, 330 216, 380 216" fill="none" stroke-width="1.6" stroke-dasharray="5 5"/>
+
+  <!-- alice -->
+  <rect class="card" x="380" y="58" width="472" height="52" rx="8" stroke-width="1.2"/>
+  <circle class="ok" cx="404" cy="84" r="9"/>
+  <path d="M399.5 84.5l3 3 6-6.5" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/>
+  <text class="ink sans" x="424" y="89" font-size="14" font-weight="600">@alice</text>
+  <text class="ink mono" x="500" y="89" font-size="13">STRIPE_KEY=sk_live_••••</text>
+  <text class="mute sans" x="752" y="89" font-size="12">GitHub SSH key</text>
+
+  <!-- bob -->
+  <rect class="card" x="380" y="124" width="472" height="52" rx="8" stroke-width="1.2"/>
+  <circle class="ok" cx="404" cy="150" r="9"/>
+  <path d="M399.5 150.5l3 3 6-6.5" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/>
+  <text class="ink sans" x="424" y="155" font-size="14" font-weight="600">@bob</text>
+  <text class="ink mono" x="500" y="155" font-size="13">STRIPE_KEY=sk_live_••••</text>
+  <text class="mute sans" x="752" y="155" font-size="12">GitHub SSH key</text>
+
+  <!-- anyone else -->
+  <rect class="card" x="380" y="190" width="472" height="52" rx="8" stroke-width="1.2"/>
+  <circle class="no" cx="404" cy="216" r="9"/>
+  <path d="M400 212l8 8M408 212l-8 8" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/>
+  <text class="ink sans" x="424" y="221" font-size="14" font-weight="600">anyone else</text>
+  <text class="cipher mono" x="520" y="221" font-size="13">age-encryption.org/v1 -&gt; ssh-ed25519…</text>
+
+  <text class="mute sans" x="440" y="280" font-size="13" text-anchor="middle">Same clone, same files. Access per file, enforced by math, not by a server.</text>
+</svg>
