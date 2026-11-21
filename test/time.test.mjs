@@ -151,3 +151,10 @@ test('lock devolve o cifrado ao disco e unlock volta ao texto claro, mesmo com o
   assert.match(fs.readFileSync(path.join(a, '.env'), 'utf8'), /STRIPE_KEY/);
   assert.equal(gitc('alice', a, 'status', '--porcelain'), '');
 });
+
+test('--version mostra a versão do package.json, a mesma que o npm publica', () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(HERE, '..', 'package.json'), 'utf8'));
+  const r = spawnSync(process.execPath, [BIN, '--version'], { encoding: 'utf8' });
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout.trim(), pkg.version);
+});

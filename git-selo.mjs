@@ -331,6 +331,7 @@ const HELP = `git selo — private files inside a normal Git repo
                                        encrypted for the wrong people
   git selo unlock / lock               decrypt this clone / put the ciphertext back
   git selo key                         make a dedicated key (~/.config/selo/identity.txt)
+  git selo --version                   print the installed version
   git selo cat <file> [--rev REV]      print a protected file from any revision
   git selo branch push <b> [--for g]   push a whole branch encrypted (refs/selo/<b>)
   git selo branch pull <b>             get a private branch back as a normal branch
@@ -461,6 +462,11 @@ async function main(argv) {
       const pt = age.isAge(blob) ? age.decrypt(blob, loadIdentities()) : blob;
       if (!pt) fail(`you are not a reader of ${args[0]}`);
       process.stdout.write(pt);
+      return;
+    }
+    case '-v': case '--version': case 'version': {
+      // Lido do package.json ao lado: um número só, o mesmo que o npm publica.
+      console.log(JSON.parse(fs.readFileSync(path.join(path.dirname(SELF), 'package.json'), 'utf8')).version);
       return;
     }
     case undefined: case '-h': case '--help': case 'help': console.log(HELP); return;
