@@ -1,6 +1,6 @@
 {
   "name": "git-selo",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Private files and private branches inside a normal Git repo, encrypted to your teammates' GitHub SSH keys. Zero dependencies, standard age format.",
   "type": "module",
   "bin": {

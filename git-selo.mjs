@@ -222,8 +222,11 @@ function checkBranchName(n) {
   if (n.startsWith('-')) fail(`invalid branch name "${n}"`);
 }
 const BOT = { GIT_AUTHOR_NAME: 'git-selo', GIT_AUTHOR_EMAIL: 'git-selo@localhost', GIT_COMMITTER_NAME: 'git-selo', GIT_COMMITTER_EMAIL: 'git-selo@localhost' };
-function branchPush(name, remote, groups) {
+// `extras` são arquivos já cifrados que viajam junto do bundle (ex.: a revisão trazida da sala).
+// O que já estava na ref além do bundle é mantido, para um push não apagar a revisão de outro.
+function branchPush(name, remote, groups, extras = []) {
   checkBranchName(name);
+  try { git(['fetch', '--quiet', remote, `+${seloRef(name)}:${seloRef(name)}`], { cwd: root() }); } catch {}
   const dir = root(), policy = branchPolicy(remote);
   if (groups.length) { const p = loadPolicy(dir); p.branches[name] = groups; savePolicy(p, dir); policy.branches[name] = groups; say(`${POLICY}: branch "${name}" readable by ${groups.join(', ')} (commit this file)`); }
   const who = branchReaders(policy, name);
@@ -236,7 +239,10 @@ function branchPush(name, remote, groups) {
     catch (e) { if (/empty bundle/i.test(String(e.stderr))) fail(`every commit of "${name}" is already on ${remote}: nothing private to push`); throw e; }
     const ct = age.encrypt(fs.readFileSync(file), r.recips);
     const blob = git(['hash-object', '-w', '--stdin'], { input: ct }).trim();
-    const tree = git(['mktree'], { input: `100644 blob ${blob}\tbundle.age\n` }).trim();
+    let kept = [];
+    try { kept = git(['ls-tree', seloRef(name)]).split('\n').filter((l) => l && !l.endsWith('\tbundle.age')); } catch {}
+    const added = extras.map((e) => `100644 blob ${git(['hash-object', '-w', '--stdin'], { input: e.data }).trim()}\t${e.name}`);
+    const tree = git(['mktree'], { input: [`100644 blob ${blob}\tbundle.age`, ...kept, ...added].join('\n') + '\n' }).trim();
     const commit = git(['commit-tree', tree, '-m', `git-selo private branch ${name}`], { env: { ...process.env, ...BOT } }).trim();
     git(['update-ref', seloRef(name), commit]);
     git(['push', '--quiet', remote, `+${seloRef(name)}:${seloRef(name)}`], { cwd: dir });
@@ -282,6 +288,213 @@ function branchList(remote) {
     const who = branchReaders(policy, n);
     console.log(`${n}\n  readers: ${who ? resolveReaders(policy, who).people.join(', ') : '(not in .selo.json)'}\n  ${can ? 'you can read' : 'encrypted (not for you)'}`);
   }
+}
+// ---------- revisão, sala e merge ----------
+// A base da revisão é a branch principal do remoto: a mesma que a política usa.
+function baseRef(remote, base) {
+  const cands = base ? [base] : [`refs/remotes/${remote}/HEAD`, `refs/remotes/${remote}/main`, `refs/remotes/${remote}/master`, 'refs/heads/main', 'refs/heads/master'];
+  for (const c of cands) {
+    try {
+      git(['rev-parse', '--verify', '--quiet', `${c}^{commit}`]);
+      const full = git(['rev-parse', '--symbolic-full-name', c]).trim() || c;
+      return { ref: c, name: full.replace(/^refs\/(remotes\/[^/]+|heads)\//, '') };
+    } catch {}
+  }
+  fail(base ? `no such base "${base}"` : 'could not find the base branch; pass --base <branch>');
+}
+function needLocal(name) {
+  checkBranchName(name);
+  try { git(['rev-parse', '--verify', '--quiet', `refs/heads/${name}`]); } catch { fail(`no local branch "${name}": run \`git selo branch pull ${name}\` first`); }
+}
+// As revisões trazidas da sala ficam em refs/selo/<b> como review-*.json.age, cifradas para os leitores.
+function savedReviews(name) {
+  let lines = [];
+  try { lines = git(['ls-tree', seloRef(name)]).split('\n').filter((l) => /\treview-[^/]+\.json\.age$/.test(l)); } catch { return []; }
+  const ids = loadIdentities(true), out = [];
+  for (const l of lines) {
+    const pt = age.decrypt(git(['cat-file', 'blob', l.split(/\s+/)[2]], { raw: true }), ids);
+    if (pt) out.push(JSON.parse(pt.toString('utf8')));
+  }
+  return out.sort((a, b) => String(a.closedAt).localeCompare(String(b.closedAt)));
+}
+const esc = (t) => String(t).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+function branchReview(name, remote, base, html) {
+  needLocal(name);
+  const b = baseRef(remote, base), head = `refs/heads/${name}`;
+  const log = git(['log', '--format=%h %an: %s', `${b.ref}..${head}`]).trim();
+  const stat = git(['diff', '--no-color', '--stat', `${b.ref}...${head}`]).trim();
+  // O diff passa pelo textconv do selo: quem é leitor vê os arquivos protegidos em texto claro.
+  const diff = git(['diff', '--no-color', `${b.ref}...${head}`]);
+  const reviews = savedReviews(name);
+  if (html) {
+    const cls = (l) => (/^(diff |index |--- |\+\+\+ )/.test(l) ? 'h' : l.startsWith('@@') ? 'k' : l.startsWith('+') ? 'a' : l.startsWith('-') ? 'd' : '');
+    const lines = diff.split('\n').map((l) => `<span class="${cls(l)}">${esc(l)}</span>`).join('\n');
+    const rv = reviews.map((r) => `<h2>Review from ${esc(r.room)} (${esc(r.closedAt)})</h2><ul>${[...r.reviews, ...r.comments, ...r.conversation].map((c) => `<li><b>${esc(c.user)}</b>${c.path ? ` <code>${esc(c.path)}${c.line ? ':' + esc(c.line) : ''}</code>` : ''}${c.state ? ` [${esc(c.state)}]` : ''}: ${esc(c.body)}</li>`).join('')}</ul>`).join('');
+    fs.writeFileSync(html, `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>${esc(name)} vs ${esc(b.name)}</title>
+<style>:root{color-scheme:light dark;--bg:#fff;--fg:#1f2328;--a:#dafbe1;--d:#ffebe9;--k:#ddf4ff;--m:#59636e}@media(prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--a:#12361f;--d:#4b1619;--k:#0c2d6b;--m:#9198a1}}body{background:var(--bg);color:var(--fg);font:14px system-ui,sans-serif;margin:0 auto;max-width:1100px;padding:16px}pre{font:12px ui-monospace,monospace;overflow-x:auto}pre span{display:block;white-space:pre}.a{background:var(--a)}.d{background:var(--d)}.k{background:var(--k)}.h{font-weight:700}small{color:var(--m)}</style>
+<h1>${esc(name)} <small>vs ${esc(b.name)}</small></h1><p><small>Private branch, rendered locally by git selo. This file holds plaintext: don't commit or share it.</small></p>
+<h2>Commits</h2><pre>${esc(log || '(none)')}</pre><h2>Files</h2><pre>${esc(stat)}</pre>${rv}<h2>Diff</h2><pre>${lines}</pre>\n`, { mode: 0o600 });
+    console.log(`wrote ${html} (plaintext; open it in your browser, don't commit it)`);
+    return;
+  }
+  console.log(`# ${name} vs ${b.name}\n\n## commits\n${log || '(none)'}\n\n## files\n${stat}\n`);
+  for (const r of reviews) {
+    console.log(`## review from ${r.room} (${r.closedAt})`);
+    for (const c of [...r.reviews, ...r.comments, ...r.conversation]) console.log(`- ${c.user}${c.path ? ` ${c.path}${c.line ? ':' + c.line : ''}` : ''}${c.state ? ` [${c.state}]` : ''}: ${c.body}`);
+    console.log('');
+  }
+  process.stdout.write(diff);
+}
+
+// Sala de revisão: um repositório PRIVADO temporário no GitHub com exatamente os leitores da branch,
+// para ter a tela de PR de verdade. Fecha trazendo de volta os commits e a conversa, cifrados, e apaga.
+function ghToken() {
+  const t = process.env.SELO_GITHUB_TOKEN || process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
+  if (t) return t;
+  try { return execFileSync('gh', ['auth', 'token'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); }
+  catch { fail('the review room needs a GitHub token: run `gh auth login`, or set GITHUB_TOKEN'); }
+}
+async function gh(method, url, body) {
+  const api = process.env.SELO_GITHUB_API || 'https://api.github.com';
+  const res = await fetch(api + url, { method, body: body ? JSON.stringify(body) : undefined,
+    headers: { authorization: `Bearer ${ghToken()}`, accept: 'application/vnd.github+json', 'user-agent': 'git-selo', 'x-github-api-version': '2022-11-28', ...(body ? { 'content-type': 'application/json' } : {}) } });
+  const text = await res.text();
+  let data = null; try { data = text ? JSON.parse(text) : null; } catch {}
+  return { status: res.status, data };
+}
+const roomUrl = (full) => (process.env.SELO_ROOM_GIT_URL || 'https://github.com/{repo}.git').replace('{repo}', full);
+// O token vai para o git por variável de ambiente (GIT_CONFIG_*), nunca na linha de comando nem na URL.
+function roomGit(full, args) {
+  const url = roomUrl(full), env = { ...process.env };
+  if (url.startsWith('https://github.com/')) {
+    Object.assign(env, { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'http.https://github.com/.extraheader',
+      GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${ghToken()}`).toString('base64')}` });
+  }
+  return git(args.map((a) => (a === '{url}' ? url : a)), { cwd: root(), env });
+}
+const roomCfg = (name, key) => { try { return git(['config', '--get', `selo.room.${name}.${key}`]).trim(); } catch { return ''; } };
+async function roomOpen(name, remote, base, owner) {
+  needLocal(name);
+  if (roomCfg(name, 'repo')) fail(`a review room for "${name}" is already open: ${roomCfg(name, 'url')}`);
+  const policy = branchPolicy(remote), who = branchReaders(policy, name);
+  if (!who) fail(`branch "${name}" is not private in ${POLICY}: there is nobody to invite`);
+  const people = resolveReaders(policy, who).people, b = baseRef(remote, base);
+  const me = await gh('GET', '/user');
+  if (me.status !== 200) fail(`GitHub said ${me.status} to /user: check your token`);
+  const login = me.data.login;
+  const slug = (s) => s.replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 40);
+  const repoName = `selo-room-${slug(path.basename(root()))}-${slug(name)}-${crypto.randomBytes(3).toString('hex')}`;
+  const spec = { name: repoName, private: true, has_issues: false, has_wiki: false, has_projects: false, auto_init: false,
+    description: `Temporary git-selo review room for a private branch. Deleted by \`git selo room close\`.` };
+  const made = owner && owner !== login ? await gh('POST', `/orgs/${encodeURIComponent(owner)}/repos`, spec) : await gh('POST', '/user/repos', spec);
+  if (made.status !== 201) fail(`could not create the room (${made.status}: ${made.data?.message || ''})`);
+  if (made.data.private !== true) { await gh('DELETE', `/repos/${made.data.full_name}`); fail('GitHub created the room as public; deleted it'); }
+  const full = made.data.full_name;
+  git(['config', `selo.room.${name}.repo`, full]);
+  const invited = [], skipped = [];
+  for (const p of people) {
+    if (!p.startsWith('@')) { skipped.push(p); continue; }
+    const u = p.slice(1);
+    if (u.toLowerCase() === login.toLowerCase()) continue;
+    const r = await gh('PUT', `/repos/${full}/collaborators/${encodeURIComponent(u)}`, { permission: 'push' });
+    if (r.status === 201 || r.status === 204) invited.push(p); else skipped.push(`${p} (${r.status})`);
+  }
+  // --no-verify: o hook barra branch privada indo para qualquer remoto; a sala é o único lugar onde ela pode ir.
+  roomGit(full, ['push', '--quiet', '--no-verify', '{url}', `${b.ref}:refs/heads/${b.name}`, `refs/heads/${name}:refs/heads/${name}`]);
+  const pr = await gh('POST', `/repos/${full}/pulls`, { title: `${name} → ${b.name}`, head: name, base: b.name,
+    body: `Private review room made by [git selo](https://github.com/thiagopatzdorf/git-selo).\n\nOnly the readers of \`${name}\` are here: ${people.join(', ')}.\n\nReview as usual and push commits to \`${name}\`. **Don't click Merge**: when you're done, the author runs \`git selo room close ${name}\`, which brings the commits and this conversation back encrypted and deletes this repository.` });
+  if (pr.status !== 201) fail(`room ${full} created, but the pull request failed (${pr.status}: ${pr.data?.message || ''}). Close it with \`git selo room close ${name}\``);
+  git(['config', `selo.room.${name}.pr`, String(pr.data.number)]);
+  git(['config', `selo.room.${name}.base`, b.name]);
+  git(['config', `selo.room.${name}.url`, pr.data.html_url]);
+  console.log(`review room open: ${pr.data.html_url}\n  private repo ${full}, invited: ${invited.join(', ') || '(only you)'}`);
+  if (skipped.length) say(`not invited (no GitHub user or the invite failed): ${skipped.join(', ')}`);
+  console.log(`invitees accept the invite from GitHub's email or https://github.com/${full}/invitations\nwhen done: git selo room close ${name}`);
+}
+async function roomClose(name, remote, keep) {
+  checkBranchName(name);
+  const full = roomCfg(name, 'repo'), number = roomCfg(name, 'pr');
+  if (!full) fail(`no review room open for "${name}"`);
+  // Revisão já guardada numa tentativa anterior (a exclusão falhou): só falta apagar, sem duplicar.
+  if (roomCfg(name, 'saved') !== 'true') await roomSave(name, remote, full, number);
+  if (keep) { console.log(`room kept open: ${roomCfg(name, 'url')}`); return; }
+  const del = await gh('DELETE', `/repos/${full}`);
+  if (del.status === 204 || del.status === 404) {
+    try { git(['config', '--remove-section', `selo.room.${name}`]); } catch {}
+    console.log(`room ${full} deleted`);
+  } else {
+    git(['config', `selo.room.${name}.saved`, 'true']);
+    fail(`could not delete ${full} (${del.status}${del.status === 403 ? ': the token needs the delete_repo scope, `gh auth refresh -s delete_repo`' : ''}). The review is saved; delete it at https://github.com/${full}/settings or run \`git selo room close ${name}\` again`);
+  }
+}
+async function roomSave(name, remote, full, number) {
+  const tmpRef = `refs/selo-room/${name}`;
+  roomGit(full, ['fetch', '--quiet', '{url}', `+refs/heads/${name}:${tmpRef}`]);
+  const local = git(['rev-parse', `refs/heads/${name}`]).trim(), there = git(['rev-parse', tmpRef]).trim();
+  const isAnc = (a, b2) => { try { git(['merge-base', '--is-ancestor', a, b2]); return true; } catch { return false; } };
+  if (local !== there) {
+    if (isAnc(local, there)) {
+      const current = (() => { try { return git(['symbolic-ref', '--quiet', '--short', 'HEAD']).trim(); } catch { return ''; } })();
+      if (current === name) git(['merge', '--ff-only', '--quiet', tmpRef], { cwd: root() });
+      else git(['update-ref', `refs/heads/${name}`, there, local]);
+      say(`brought back ${git(['rev-list', '--count', `${local}..${there}`]).trim()} commit(s) from the room`);
+    } else if (!isAnc(there, local)) {
+      fail(`"${name}" changed both here and in the room. Merge ${tmpRef} into it, then run \`git selo room close ${name}\` again`);
+    }
+  }
+  const conv = { room: full, pr: Number(number) || null, closedAt: new Date().toISOString(), reviews: [], comments: [], conversation: [] };
+  if (number) {
+    const list = async (u) => { const r = await gh('GET', `${u}?per_page=100`); return Array.isArray(r.data) ? r.data : []; };
+    conv.reviews = (await list(`/repos/${full}/pulls/${number}/reviews`)).filter((r) => r.body || r.state !== 'COMMENTED').map((r) => ({ user: r.user?.login, state: r.state, body: r.body || '', at: r.submitted_at }));
+    conv.comments = (await list(`/repos/${full}/pulls/${number}/comments`)).map((c) => ({ user: c.user?.login, path: c.path, line: c.line ?? c.original_line ?? null, body: c.body, at: c.created_at }));
+    conv.conversation = (await list(`/repos/${full}/issues/${number}/comments`)).map((c) => ({ user: c.user?.login, body: c.body, at: c.created_at }));
+  }
+  const policy = branchPolicy(remote), r = resolveReaders(policy, branchReaders(policy, name) || fail(`branch "${name}" is not private in ${POLICY}`));
+  const stamp = conv.closedAt.replace(/[:.]/g, '-');
+  branchPush(name, remote, [], [{ name: `review-${stamp}.json.age`, data: age.encrypt(Buffer.from(JSON.stringify(conv, null, 2)), r.recips) }]);
+  git(['update-ref', '-d', tmpRef]);
+  const n = conv.reviews.length + conv.comments.length + conv.conversation.length;
+  console.log(`saved ${n} review item(s), encrypted, in ${seloRef(name)} (read them with \`git selo branch review ${name}\`)`);
+}
+
+// Publicar: o merge na branch principal é o momento de revelar a branch. Os arquivos protegidos pela
+// camada de arquivos ("files" no .selo.json) continuam cifrados, porque o Git guarda o cifrado.
+function mergePolicies(ours, theirs, drop) {
+  const groups = { ...ours.groups };
+  for (const [g, m] of Object.entries(theirs.groups)) groups[g] = [...new Set([...(groups[g] || []), ...m])];
+  const branches = { ...ours.branches, ...theirs.branches }; delete branches[drop];
+  return { groups, files: { ...ours.files, ...theirs.files }, branches, keys: { ...ours.keys, ...theirs.keys } };
+}
+function branchMerge(name, remote, into, noPush) {
+  needLocal(name);
+  const dir = root();
+  if (git(['status', '--porcelain', '--untracked-files=no'], { cwd: dir }).trim()) fail('commit or stash your changes first');
+  const target = into || baseRef(remote).name;
+  git(['checkout', '--quiet', target], { cwd: dir });
+  const msg = `Merge private branch '${name}' into ${target}`;
+  let conflicted = [];
+  try { git(['merge', '--no-ff', '--no-commit', '--quiet', `refs/heads/${name}`], { cwd: dir }); }
+  catch { conflicted = git(['diff', '--name-only', '--diff-filter=U'], { cwd: dir }).split('\n').filter(Boolean); if (!conflicted.length) throw new Error('merge failed'); }
+  // A lista de quem lê é gerada: se só ela conflita, a união é determinística e não precisa de gente.
+  if (conflicted.some((f) => f !== POLICY && f !== '.gitattributes')) {
+    git(['merge', '--abort'], { cwd: dir });
+    fail(`conflicts in ${conflicted.join(', ')}: merge "${name}" by hand, then run \`git selo branch merge ${name}\` again (or delete ${seloRef(name)} yourself)`);
+  }
+  const stage = (n, f) => { try { return git(['show', `:${n}:${f}`], { cwd: dir }); } catch { return undefined; } };
+  const ours = conflicted.includes(POLICY) ? loadPolicy(dir, stage(2, POLICY)) : loadPolicy(dir);
+  const theirs = conflicted.includes(POLICY) ? loadPolicy(dir, stage(3, POLICY)) : ours;
+  if (conflicted.includes('.gitattributes')) fs.writeFileSync(path.join(dir, '.gitattributes'), stage(2, '.gitattributes') || '');
+  const merged = mergePolicies(ours, theirs, name);
+  savePolicy(merged, dir); syncAttributes(merged, dir);
+  git(['add', POLICY, '.gitattributes'], { cwd: dir });
+  if (conflicted.length) console.log(`${conflicted.join(' and ')}: both sides changed the reader list; merged them (union, ${name} no longer private)`);
+  git(['commit', '--quiet', '--no-verify', '-m', msg], { cwd: dir });
+  if (noPush) { console.log(`merged "${name}" into ${target} locally. Push ${target}, then: git push ${remote} :${seloRef(name)}`); return; }
+  git(['push', '--quiet', remote, `refs/heads/${target}:refs/heads/${target}`], { cwd: dir });
+  try { git(['push', '--quiet', remote, `:${seloRef(name)}`], { cwd: dir }); } catch {}
+  try { git(['update-ref', '-d', seloRef(name)]); } catch {}
+  const kept = protectedFiles(merged).length;
+  console.log(`merged "${name}" into ${target} and pushed it; ${seloRef(name)} removed. ${kept} protected file(s) stay encrypted.`);
 }
 function syncAttributes(policy, dir = root()) {
   const file = path.join(dir, '.gitattributes');
@@ -336,6 +549,12 @@ const HELP = `git selo — private files inside a normal Git repo
   git selo branch push <b> [--for g]   push a whole branch encrypted (refs/selo/<b>)
   git selo branch pull <b>             get a private branch back as a normal branch
   git selo branch list                 private branches on the remote, and which you can read
+  git selo branch review <b> [--html F]  commits and diff against main, locally (plus saved reviews)
+  git selo branch merge <b> [--into B] publish: merge into main, push, drop refs/selo/<b>
+                                       (files under "files" stay encrypted)
+  git selo room open <b>               temporary PRIVATE GitHub repo with exactly the readers,
+                                       and a real pull request to review in
+  git selo room close <b> [--keep]     bring commits and comments back encrypted, delete the room
 
 Readers decrypt with ~/.ssh/id_ed25519 or id_rsa, $SELO_IDENTITY, or the selo key.
 Files are standard age (https://age-encryption.org): \`age -d -i ~/.ssh/id_ed25519 file\` works too.`;
@@ -355,7 +574,16 @@ async function main(argv) {
       if (sub === 'push') { const groups = []; let g; while ((g = flag(args, '--for'))) groups.push(g); return branchPush(args[1], remote, groups); }
       if (sub === 'pull') return branchPull(name, remote, args.includes('--force'));
       if (sub === 'list') return branchList(remote);
-      fail('usage: git selo branch push <name> [--for group] | pull <name> [--force] | list   [--remote R]');
+      if (sub === 'review') { const base = flag(args, '--base'), html = flag(args, '--html'); return branchReview(args[1], remote, base, html); }
+      if (sub === 'merge') { const into = flag(args, '--into'); return branchMerge(args[1], remote, into, args.includes('--no-push')); }
+      fail('usage: git selo branch push <name> [--for group] | pull <name> [--force] | list | review <name> [--html F] | merge <name> [--into B]   [--remote R]');
+    }
+    case 'room': {
+      const remote = flag(args, '--remote') || 'origin', base = flag(args, '--base'), owner = flag(args, '--owner');
+      const [sub, name] = args;
+      if (sub === 'open') return roomOpen(name, remote, base, owner);
+      if (sub === 'close') return roomClose(name, remote, args.includes('--keep'));
+      fail('usage: git selo room open <branch> [--owner org] [--base B] | close <branch> [--keep]');
     }
     case 'init': {
       const dir = root(), file = path.join(dir, POLICY);

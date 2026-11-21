@@ -84,9 +84,35 @@ git selo branch pull launch              # readers get it back as a normal Git b
 - Who can read a branch lives in `"branches"` in `.selo.json`, taken from the remote's main branch, so
   a stale copy inside an old branch can't loosen it.
 
-What it doesn't do: no PR/diff UI on GitHub while it's encrypted (GitHub can't read it; review
-locally), and merging into `main` makes it public, which is the point of merging. The branch *name*,
-size and push times are visible.
+### Reviewing and merging a private branch
+
+GitHub can't show a diff it can't read, so review goes where it can be read, and only by the readers:
+
+```sh
+git selo branch review launch --html review.html   # commits + diff vs main, rendered locally
+git selo room open launch                          # a real PR, in a PRIVATE temporary repo
+git selo room close launch                         # commits and comments come back encrypted; room deleted
+git selo branch merge launch                       # publish: merge into main, push, drop refs/selo/launch
+```
+
+- **`branch review`** prints the commits and the diff against `main` (protected files decrypted through
+  the selo diff driver, if you're a reader), plus any review saved from a room. `--html` writes a
+  self-contained page (mode `600`, nothing leaves your machine).
+- **`room open`** creates a private repository on your GitHub account (or `--owner <org>`), invites
+  exactly the branch's readers, pushes `main` and the branch, and opens the pull request. You get the
+  normal GitHub review: line comments, suggestions, approvals, CI. GitHub's all-or-nothing access is the
+  problem for the whole repo; for a room with exactly the right people it is the right answer.
+- **`room close`** fetches the branch back (reviewers can push fixes in the room), saves the reviews and
+  comments as `review-<time>.json.age` next to the bundle in `refs/selo/<name>`, encrypted to the same
+  readers, re-pushes the private branch, and deletes the room. Deleting needs the `delete_repo` scope
+  (`gh auth refresh -s delete_repo`); without it the review is still saved and you get the link to delete.
+- **`branch merge`** is the moment of publishing. The branch's commits become public on `main`, but
+  files under `"files"` in `.selo.json` **stay encrypted**, because Git stores their ciphertext. For a
+  module that must never be public, protect its path too: the two layers combine. If `main` and the
+  branch both changed `.selo.json`, the merge unites the reader lists instead of stopping on a conflict.
+
+Trade-off, said plainly: inside the room GitHub sees the code, as in any private repo. If you don't
+trust GitHub with it, stay with `branch review`. The branch *name*, size and push times are visible.
 
 ## Why it's different
 
@@ -129,6 +155,9 @@ size and push times are visible.
 | `git selo cat <file> [--rev REV]` | print a protected file from any commit |
 | `git selo branch push <b> [--for group]` | push a whole branch encrypted to `refs/selo/<b>` |
 | `git selo branch pull <b>` / `list` | get a private branch back as a normal branch / see which exist |
+| `git selo branch review <b> [--html F]` | commits and diff vs `main`, locally, plus reviews saved from a room |
+| `git selo room open <b>` / `close <b>` | a temporary private GitHub repo with exactly the readers and a real PR / bring it back encrypted and delete it |
+| `git selo branch merge <b> [--into B]` | publish: merge, push, drop `refs/selo/<b>`; protected files stay encrypted |
 | `git selo key` | create `~/.config/selo/identity.txt` and print its `age1…` key |
 
 ## The CI gate
@@ -191,6 +220,12 @@ Keys are read from `$SELO_IDENTITY`, `$SELO_IDENTITY_FILE`, `~/.config/selo/iden
   remote's objects; a plain clone doesn't fetch it; readers get the full history back; the `pre-push`
   guard stops `git push origin <private>` even from inside a branch whose `.selo.json` predates the policy;
   the encrypted bundle opens with the official `age` and `git bundle list-heads` reads it.
+- **Review room and merge**: the room is created private, invites exactly the readers (not the owner, not
+  outsiders), opens the PR, and `close` brings back the reviewer's commit and the comments; neither the
+  commit nor the comment text appears in the shared remote, and a non-reader can't open the saved review.
+  The HTML review escapes the diff. After `branch merge`, `main` holds the branch's code and the protected
+  files still as age ciphertext; a reader-list conflict in `.selo.json` resolves itself (the test fails
+  without that code).
 - CI on Node 20 and 22, and this repo protects itself with its own `.selo.json`.
 
 ## Limits, said plainly
