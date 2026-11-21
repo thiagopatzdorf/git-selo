@@ -34,10 +34,10 @@ function loadPolicy(dir = root(), text) {
   const file = path.join(dir, POLICY);
   if (text === undefined) { if (!fs.existsSync(file)) fail(`no ${POLICY} here. Run \`git selo init\` first.`); text = fs.readFileSync(file, 'utf8'); }
   const p = JSON.parse(text);
-  return { groups: p.groups || {}, files: p.files || {}, branches: p.branches || {}, keys: p.keys || {} };
+  return { groups: p.groups || {}, files: p.files || {}, branches: p.branches || {}, keys: p.keys || {}, ...(p.trace ? { trace: p.trace } : {}) };
 }
 function savePolicy(p, dir = root()) {
-  const sorted = { groups: p.groups, files: p.files, ...(Object.keys(p.branches || {}).length ? { branches: p.branches } : {}), keys: Object.fromEntries(Object.entries(p.keys).sort()) };
+  const sorted = { groups: p.groups, files: p.files, ...(Object.keys(p.branches || {}).length ? { branches: p.branches } : {}), ...(p.trace ? { trace: p.trace } : {}), keys: Object.fromEntries(Object.entries(p.keys).sort()) };
   fs.writeFileSync(path.join(dir, POLICY), JSON.stringify(sorted, null, 2) + '\n');
 }
 
@@ -133,9 +133,13 @@ function cachePut(file, pt, rid, ct) {
 
 // ---------- filtros do Git ----------
 function clean(file) {
-  const input = readStdin();
+  let input = readStdin();
   if (age.isAge(input)) return process.stdout.write(input); // sem acesso: o arquivo já está cifrado, passa intacto
-  const r = recipientsFor(loadPolicy(process.cwd()), file);
+  const policy = loadPolicy(process.cwd());
+  // A marca do leitor nunca entra no repositório. A regra lembrada no clone cobre quem puxou um `trace off`
+  // e ainda tem a marca antiga no disco: sem ela, o próximo commit levaria o token junto.
+  for (const t of [policy.trace, localTrace().trace]) if (t) input = traceUnmark(input, t);
+  const r = recipientsFor(policy, file);
   // Recusar é melhor que commitar em claro: o `git add` falha e nada sai cifrado para ninguém.
   if (!r || !r.recips.length) fail(`${file} is protected but has no readers in ${POLICY}; refusing to commit it in plaintext`);
   const rid = recipsId(r.recips);
@@ -149,11 +153,15 @@ function smudge(file) {
   let pt = null;
   try { pt = age.decrypt(input, loadIdentities(true)); } catch (e) { say(`${file}: ${e.message}`); }
   if (!pt) return process.stdout.write(input); // sem chave: fica cifrado no disco, o checkout não quebra
+  let out = pt;
   try {
-    const r = recipientsFor(loadPolicy(process.cwd()), file);
+    const policy = loadPolicy(process.cwd());
+    const r = recipientsFor(policy, file);
     if (r && matchesPolicy(input, r.recips)) cachePut(file, pt, recipsId(r.recips), input);
+    const token = policy.trace && myTraceToken();
+    if (token) out = traceMark(file, pt, policy.trace, token);
   } catch {}
-  process.stdout.write(pt);
+  process.stdout.write(out);
 }
 function textconv(tmp) {
   const buf = fs.readFileSync(tmp);
@@ -496,6 +504,170 @@ function branchMerge(name, remote, into, noPush) {
   const kept = protectedFiles(merged).length;
   console.log(`merged "${name}" into ${target} and pushed it; ${seloRef(name)} removed. ${kept} protected file(s) stay encrypted.`);
 }
+// ---------- rastro: uma marca por leitor dentro da cópia decifrada ----------
+// Quem decifra recebe os arquivos com uma marca que só a cópia dele tem: nos .env, uma linha com um
+// link-isca (quem abrir o link dispara um e-mail ao dono); no código, uma linha de comentário com o
+// token em caracteres de largura zero. O `clean` tira a marca antes de cifrar, então o repositório
+// nunca guarda token nenhum e o `git status` continua limpo.
+export const TRACE_DEFAULT_SERVER = 'https://rastro.genesisinnovation.io';
+const TRACE_DIR = '.selo-trace';
+const COMMENT = { '//': ['js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'go', 'rs', 'java', 'kt', 'c', 'h', 'cc', 'cpp', 'hpp', 'cs', 'swift', 'php', 'scss', 'dart'],
+  '#': ['py', 'rb', 'sh', 'bash', 'zsh', 'yml', 'yaml', 'toml', 'conf', 'ini', 'pl', 'r', 'tf', 'tfvars'], '--': ['sql', 'lua', 'hs'] };
+const ZW0 = '\u200B', ZW1 = '\u200C', ZWNL = '\u200D'; // 0, 1, e "a marca acrescentou a quebra de linha final"
+const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+const isEnv = (f) => /(^|\/)\.env(\..+)?$|\.env$/.test(f);
+const commentOf = (f) => { const ext = path.extname(f).slice(1).toLowerCase(); return Object.keys(COMMENT).find((k) => COMMENT[k].includes(ext)) || null; };
+export const zwEncode = (t) => [...t].map((c) => B64.indexOf(c).toString(2).padStart(6, '0')).join('').replace(/0/g, ZW0).replace(/1/g, ZW1);
+export const zwDecode = (z) => { const bits = z.replace(new RegExp(ZW0, 'g'), '0').replace(new RegExp(ZW1, 'g'), '1'); let o = ''; for (let i = 0; i + 6 <= bits.length; i += 6) o += B64[parseInt(bits.slice(i, i + 6), 2)]; return o; };
+const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+function markRegexes(trace) {
+  return [new RegExp(`^${escRe(trace.var)}=\\S*/c/([\\w-]{8,64})(${ZWNL})?$`, 'm'), new RegExp(`^(?://|#|--) ([${ZW0}${ZW1}]{48,384})(${ZWNL})?$`, 'm')];
+}
+export function traceMark(file, pt, trace, token) {
+  if (pt.includes(0)) return pt; // binário não leva marca
+  let line;
+  if (isEnv(file)) line = `${trace.var}=${trace.server.replace(/\/$/, '')}/c/${token}`;
+  else if (commentOf(file)) line = `${commentOf(file)} ${zwEncode(token)}`;
+  else return pt;
+  const s = pt.toString('utf8'), nl = s.length && !s.endsWith('\n');
+  return Buffer.from(s + (nl ? '\n' : '') + line + (nl ? ZWNL : '') + '\n');
+}
+export function traceUnmark(pt, trace) {
+  if (pt.includes(0)) return pt;
+  let s = pt.toString('utf8');
+  for (const re of markRegexes(trace)) {
+    const m = s.match(re);
+    if (!m) continue;
+    const start = m.index, end = start + m[0].length + (s[start + m[0].length] === '\n' ? 1 : 0);
+    // A marca acrescentou a quebra de linha que o arquivo não tinha: tira as duas, para o conteúdo voltar idêntico.
+    s = m[2] && end === s.length && start > 0 ? s.slice(0, start - 1) : s.slice(0, start) + s.slice(end);
+  }
+  return Buffer.from(s);
+}
+export function traceTokenIn(text, trace) {
+  const s = text.toString('utf8');
+  const [env, zw] = markRegexes(trace);
+  const a = s.match(env); if (a) return a[1];
+  const b = s.match(zw); if (b) return zwDecode(b[1]);
+  const c = s.match(/\/c\/([\w-]{16,64})/); return c ? c[1] : null;
+}
+const traceFile = () => path.join(gitDir(), 'selo', 'trace.json');
+const ownerFile = () => path.join(gitDir(), 'selo', 'trace-owner.json');
+const localTrace = () => { try { return JSON.parse(fs.readFileSync(traceFile(), 'utf8')); } catch { return {}; } };
+const myTraceToken = () => localTrace().token || null;
+const personId = (p) => crypto.createHash('sha256').update(p).digest('hex').slice(0, 16);
+const personLabel = (p) => (p.startsWith('@') || p.startsWith('age1') ? p : `key:${personId(p)}`);
+function allReaders(policy) { return [...new Set(Object.values(policy.files).flatMap((who) => expand(policy, who)))]; }
+// Descobre qual dos arquivos de .selo-trace/ é o meu (o único que a minha chave abre) e guarda o token
+// em .git/selo/trace.json, de onde o smudge lê. Sem rastro na política, apaga o que houver.
+function refreshTrace(policy, dir = root()) {
+  fs.rmSync(traceFile(), { force: true });
+  if (!policy.trace) return null;
+  const save = (token) => { fs.mkdirSync(path.dirname(traceFile()), { recursive: true, mode: 0o700 }); fs.writeFileSync(traceFile(), JSON.stringify({ token, trace: policy.trace }), { mode: 0o600 }); };
+  const d = path.join(dir, TRACE_DIR);
+  if (!fs.existsSync(d)) return null;
+  const ids = loadIdentities(true);
+  for (const f of fs.readdirSync(d).filter((x) => x.endsWith('.age'))) {
+    let pt = null; try { pt = age.decrypt(fs.readFileSync(path.join(d, f)), ids); } catch {}
+    if (pt) { save(pt.toString('utf8').trim()); return pt.toString('utf8').trim(); }
+  }
+  return null;
+}
+// Regrava no disco os arquivos protegidos pelo filtro, para a marca entrar (ou sair) já.
+// A conferência vem ANTES de mudar a política: depois, o clean já usa a regra nova e a marca antiga
+// pareceria uma alteração do usuário (medido no primeiro `trace off`).
+function assertClean(dir, files) {
+  const dirty = files.length ? git(['status', '--porcelain', '--', ...files], { cwd: dir }).trim() : '';
+  if (dirty) fail(`commit or stash changes to protected files first:\n${dirty}`);
+}
+function recheckout(dir, files) {
+  if (!files.length) return;
+  for (const f of files) fs.rmSync(path.join(dir, f), { force: true });
+  git(['checkout', '--', ...files], { cwd: dir });
+}
+async function traceApi(server, method, p, body, manage) {
+  const res = await fetch(server.replace(/\/$/, '') + p, { method, body: body ? JSON.stringify(body) : undefined,
+    headers: { 'user-agent': 'git-selo', ...(body ? { 'content-type': 'application/json' } : {}), ...(manage ? { authorization: `Bearer ${manage}` } : {}) } });
+  let data = null; try { data = await res.json(); } catch {}
+  return { status: res.status, data };
+}
+const loadOwner = () => { try { return JSON.parse(fs.readFileSync(ownerFile(), 'utf8')); } catch { fail(`no ${path.relative(root(), ownerFile())}: only the clone that ran \`git selo trace on\` can do this`); } };
+
+async function traceOn(email, server, varName) {
+  const dir = root(), p = loadPolicy(dir);
+  if (p.trace) fail('trace is already on. To change readers or settings: `git selo trace off`, then `git selo trace on` again');
+  if (!email) fail('usage: git selo trace on --email you@example.com [--server URL] [--var NAME]');
+  const people = allReaders(p);
+  if (!people.length) fail('nobody reads protected files yet: `git selo add @user` first');
+  assertClean(dir, protectedFiles(p));
+  const labels = Object.fromEntries(people.map((x) => [personLabel(x), x]));
+  const repo = (path.basename(dir) || 'repo').replace(/[^\w.\-/ ]/g, '-').slice(0, 120);
+  const r = await traceApi(server, 'POST', '/v1/watch', { email, repo, readers: Object.keys(labels) });
+  if (r.status !== 201) fail(`trace server said ${r.status}: ${r.data?.error || 'no answer'}`);
+  const d = path.join(dir, TRACE_DIR);
+  fs.mkdirSync(d, { recursive: true });
+  for (const [label, token] of Object.entries(r.data.tokens)) {
+    // Cada token vai cifrado só para o próprio leitor: ninguém vê o token do outro (e não tem como incriminar o colega).
+    fs.writeFileSync(path.join(d, personId(labels[label]) + '.age'), age.encrypt(Buffer.from(token + '\n'), resolveReaders(p, [labels[label]]).recips));
+  }
+  fs.mkdirSync(path.dirname(ownerFile()), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(ownerFile(), JSON.stringify({ server, id: r.data.id, manage: r.data.manage, tokens: r.data.tokens }, null, 2), { mode: 0o600 });
+  p.trace = { server, watch: r.data.id, var: varName };
+  savePolicy(p, dir);
+  git(['add', POLICY, TRACE_DIR], { cwd: dir });
+  refreshTrace(p, dir);
+  recheckout(dir, protectedFiles(p));
+  console.log(`trace on: ${people.length} reader copies marked (${Object.keys(labels).join(', ')}).
+${r.data.confirmation_email === 'sent' ? `Check ${email} and click "Confirm alerts": nothing is sent until you do.` : 'The server could not send the confirmation email.'}
+Commit ${POLICY} and ${TRACE_DIR}/. Readers get their mark on their next \`git selo unlock\` or checkout.
+The manage key is in ${path.relative(dir, ownerFile())} (this clone only).`);
+}
+async function traceStatus() {
+  const o = loadOwner(), r = await traceApi(o.server, 'GET', `/v1/watch/${o.id}`, null, o.manage);
+  if (r.status !== 200) fail(`trace server said ${r.status}: ${r.data?.error || ''}`);
+  console.log(`${r.data.repo}: alerts ${r.data.active ? 'ON' : 'OFF (confirm the email)'}; readers ${r.data.readers.join(', ')}`);
+  if (!r.data.hits.length) console.log('no hits');
+  for (const h of r.data.hits) console.log(`${h.at}  ${h.reader}  ${h.ip || '?'}${h.country ? ` (${h.country})` : ''}  ${h.client || ''}`);
+}
+async function traceIdentify(file) {
+  const p = loadPolicy(), o = loadOwner();
+  if (!p.trace) fail('trace is off in this repo');
+  const text = file === '-' ? readStdin() : fs.readFileSync(file);
+  const token = traceTokenIn(text, p.trace);
+  if (!token) { console.log('no git selo mark found in this file (it may have been stripped)'); process.exitCode = 1; return; }
+  const r = await traceApi(o.server, 'POST', `/v1/watch/${o.id}/identify`, { token }, o.manage);
+  if (r.status === 200) console.log(`this copy came from ${r.data.reader}`);
+  else { console.log(`a git selo mark, but not from this repo's watch (${r.status})`); process.exitCode = 1; }
+}
+async function traceScan() {
+  const o = loadOwner(), found = [];
+  for (const [reader, token] of Object.entries(o.tokens)) {
+    const r = await gh('GET', `/search/code?q=${encodeURIComponent(`"${token}"`)}`);
+    if (r.status !== 200) fail(`GitHub code search said ${r.status}: ${r.data?.message || ''}`);
+    for (const it of r.data.items || []) found.push(`${reader}: ${it.html_url}`);
+  }
+  console.log(found.length ? `found on GitHub:\n${found.join('\n')}` : `no copy found on GitHub code search (${Object.keys(o.tokens).length} marks checked)`);
+  if (found.length) process.exitCode = 1;
+}
+async function traceOff() {
+  const dir = root(), p = loadPolicy(dir);
+  if (!p.trace) fail('trace is already off');
+  const files = protectedFiles(p);
+  assertClean(dir, files);
+  let o = null; try { o = JSON.parse(fs.readFileSync(ownerFile(), 'utf8')); } catch {}
+  if (o) {
+    const r = await traceApi(o.server, 'DELETE', `/v1/watch/${o.id}`, null, o.manage);
+    if (r.status !== 200 && r.status !== 401) fail(`trace server said ${r.status}: ${r.data?.error || ''}`);
+  } else say('no manage key in this clone: the watch stays on the server until you use the stop link in its email');
+  delete p.trace; savePolicy(p, dir);
+  try { git(['rm', '-r', '-q', '--cached', '--ignore-unmatch', TRACE_DIR], { cwd: dir }); } catch {}
+  fs.rmSync(path.join(dir, TRACE_DIR), { recursive: true, force: true });
+  fs.rmSync(ownerFile(), { force: true });
+  refreshTrace(p, dir);
+  git(['add', POLICY], { cwd: dir });
+  recheckout(dir, files);
+  console.log(`trace off: watch deleted${o ? '' : ' (not on the server: no manage key here)'}, marks removed. Commit ${POLICY} and the removal of ${TRACE_DIR}/.`);
+}
 function syncAttributes(policy, dir = root()) {
   const file = path.join(dir, '.gitattributes');
   const old = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
@@ -555,6 +727,9 @@ const HELP = `git selo — private files inside a normal Git repo
   git selo room open <b>               temporary PRIVATE GitHub repo with exactly the readers,
                                        and a real pull request to review in
   git selo room close <b> [--keep]     bring commits and comments back encrypted, delete the room
+  git selo trace on --email E          mark each reader's decrypted copy (leak alert by email)
+  git selo trace status | scan | off   hits on the trace links / search GitHub for the marks / undo
+  git selo trace identify <file>       whose copy a leaked file came from
 
 Readers decrypt with ~/.ssh/id_ed25519 or id_rsa, $SELO_IDENTITY, or the selo key.
 Files are standard age (https://age-encryption.org): \`age -d -i ~/.ssh/id_ed25519 file\` works too.`;
@@ -577,6 +752,18 @@ async function main(argv) {
       if (sub === 'review') { const base = flag(args, '--base'), html = flag(args, '--html'); return branchReview(args[1], remote, base, html); }
       if (sub === 'merge') { const into = flag(args, '--into'); return branchMerge(args[1], remote, into, args.includes('--no-push')); }
       fail('usage: git selo branch push <name> [--for group] | pull <name> [--force] | list | review <name> [--html F] | merge <name> [--into B]   [--remote R]');
+    }
+    case 'trace': {
+      const server = flag(args, '--server') || process.env.SELO_TRACE_SERVER || TRACE_DEFAULT_SERVER;
+      const email = flag(args, '--email'), varName = flag(args, '--var') || 'BACKUP_ADMIN_URL';
+      const [sub, arg] = args;
+      if (varName && !/^[A-Z_][A-Z0-9_]{0,63}$/.test(varName)) fail('--var must look like an env var name (A-Z, 0-9, _)');
+      if (sub === 'on') return traceOn(email, server, varName);
+      if (sub === 'status') return traceStatus();
+      if (sub === 'identify') { if (!arg) fail('usage: git selo trace identify <file|->'); return traceIdentify(arg); }
+      if (sub === 'scan') return traceScan();
+      if (sub === 'off') return traceOff();
+      fail('usage: git selo trace on --email E [--server URL] [--var NAME] | status | identify <file> | scan | off');
     }
     case 'room': {
       const remote = flag(args, '--remote') || 'origin', base = flag(args, '--base'), owner = flag(args, '--owner');
@@ -664,11 +851,11 @@ async function main(argv) {
       // cifrado do índice e acusa mudança que não existe (só quando o mtime é ambíguo, por isso intermitente).
       const dirty = files.length ? git(['status', '--porcelain', '--', ...files], { cwd: dir }).trim() : '';
       if (dirty) fail(`commit or stash changes to protected files first:\n${dirty}`);
-      if (cmd === 'unlock') configureFilters();
+      if (cmd === 'unlock') { configureFilters(); refreshTrace(loadPolicy(dir), dir); }
       else for (const k of ['filter.selo.clean', 'filter.selo.smudge', 'filter.selo.required', 'diff.selo.textconv']) try { git(['config', '--unset', k]); } catch {}
       for (const f of files) fs.rmSync(path.join(dir, f), { force: true });
       if (files.length) git(['checkout', '--', ...files], { cwd: dir });
-      if (cmd === 'lock') { for (const f of files) fs.rmSync(cacheFile(f), { force: true }); removeHook(); }
+      if (cmd === 'lock') { for (const f of files) fs.rmSync(cacheFile(f), { force: true }); fs.rmSync(traceFile(), { force: true }); removeHook(); }
       console.log(cmd === 'unlock' ? `${files.length} protected file(s) checked out (decrypted where you are a reader)` : `${files.length} file(s) back to ciphertext; filters removed from this clone`);
       return;
     }

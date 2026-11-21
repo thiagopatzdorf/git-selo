@@ -114,6 +114,38 @@ git selo branch merge launch                       # publish: merge into main, p
 Trade-off, said plainly: inside the room GitHub sees the code, as in any private repo. If you don't
 trust GitHub with it, stay with `branch review`. The branch *name*, size and push times are visible.
 
+## Leak trace: every reader gets a marked copy
+
+Encryption stops people who aren't on the list. It can't stop someone who **is** on the list from copying
+what they can read: nothing can, if it's on their disk. What git selo can do is make every copy traceable,
+and tell you the moment one is used.
+
+```sh
+git selo trace on --email you@example.com   # mark each reader's decrypted copy; confirm the email once
+git selo trace status                       # every time a trace link was opened: whose copy, IP, country
+git selo trace identify leaked.js           # whose copy a leaked file came from
+git selo trace scan                         # search GitHub code for any of the marks
+git selo trace off                          # delete the watch on the server and remove the marks
+```
+
+- **A different mark per reader.** When Bob decrypts, his `.env` gets one extra line, a trace link only his
+  copy has (`BACKUP_ADMIN_URL=https://rastro.../c/<bob's token>`, the name is `--var`), and protected code
+  files get a comment line holding his token in zero-width characters. The `clean` filter strips the mark
+  before encrypting, so **the repository never stores a token** and `git status` stays clean.
+- **An email when a copy is used.** Anyone who opens Bob's link (a person poking at the leaked `.env`, or the
+  bots that crawl leaked secrets) triggers an email to you: *"@bob's copy of acme/app was used"*, with time,
+  IP and country. At most one email per copy every 10 minutes; every hit is recorded.
+- **Nobody can frame a colleague.** Each reader's token is encrypted only to that reader
+  (`.selo-trace/<id>.age`), so Bob can't see Alice's mark.
+- **The server sees almost nothing**: reader labels (`@bob`), your email and the repo name. Never code or
+  secrets. It's ~200 lines ([`rastro/worker.js`](rastro/worker.js)): use ours, or run your own on Cloudflare
+  ([`rastro/wrangler.toml.example`](rastro/wrangler.toml.example)) and pass `--server`.
+
+Said plainly: this **traces, it doesn't prevent**. Someone who knows the format can strip the marks, and a
+screenshot carries none. It catches the careless copy, which is most of them. For code that must never touch
+a laptop, the real answer is that it doesn't: develop in a cloud environment, and block USB on company
+machines with your MDM.
+
 ## Why it's different
 
 - **Your identity already exists.** `@alice` means the SSH keys GitHub publishes at
@@ -158,6 +190,7 @@ trust GitHub with it, stay with `branch review`. The branch *name*, size and pus
 | `git selo branch review <b> [--html F]` | commits and diff vs `main`, locally, plus reviews saved from a room |
 | `git selo room open <b>` / `close <b>` | a temporary private GitHub repo with exactly the readers and a real PR / bring it back encrypted and delete it |
 | `git selo branch merge <b> [--into B]` | publish: merge, push, drop `refs/selo/<b>`; protected files stay encrypted |
+| `git selo trace on --email E` / `status` / `identify <f>` / `scan` / `off` | mark each reader's copy, get an email when one is used, find whose copy leaked |
 | `git selo key` | create `~/.config/selo/identity.txt` and print its `age1…` key |
 
 ## The CI gate
@@ -226,6 +259,12 @@ Keys are read from `$SELO_IDENTITY`, `$SELO_IDENTITY_FILE`, `~/.config/selo/iden
   The HTML review escapes the diff. After `branch merge`, `main` holds the branch's code and the protected
   files still as age ciphertext; a reader-list conflict in `.selo.json` resolves itself (the test fails
   without that code).
+- **Leak trace** against the real trace server (the Worker in a local HTTP server, SQLite as D1): each
+  reader gets a different mark, Carol (not a reader) gets none, no token ever reaches the remote, `git
+  status` stays clean, opening Bob's link emails the owner naming Bob, a leaked code file without the `.env`
+  is still identified as Bob's, and a reader who pulls `trace off` with the old mark on disk doesn't commit
+  it. The server itself: confirmation before any alert, one email per copy per 10 minutes, the same answer
+  for real and fake tokens, and at most 3 confirmation emails per address per day.
 - CI on Node 20 and 22, and this repo protects itself with its own `.selo.json`.
 
 ## Limits, said plainly

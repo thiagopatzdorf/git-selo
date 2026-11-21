@@ -1,6 +1,6 @@
 {
   "name": "git-selo",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Private files and private branches inside a normal Git repo, encrypted to your teammates' GitHub SSH keys. Zero dependencies, standard age format.",
   "type": "module",
   "bin": {
@@ -18,7 +18,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs rastro/*.test.mjs"
   },
   "keywords": [
     "git",

@@ -1,0 +1,17 @@
+# Seu próprio servidor de rastro: copie para wrangler.toml, crie o D1 e publique.
+#   npx wrangler d1 create git-selo-rastro
+#   npx wrangler d1 execute git-selo-rastro --remote --file schema.sql
+#   npx wrangler secret put RESEND_API_KEY
+#   npx wrangler deploy
+# Depois: git selo trace on --email you@example.com --server https://<seu-host>
+name = "git-selo-rastro"
+main = "worker.js"
+compatibility_date = "2026-09-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "git-selo-rastro"
+database_id = "<o id que o d1 create devolveu>"
+
+[vars]
+REMETENTE = "git selo <alerts@your-domain.example>"
